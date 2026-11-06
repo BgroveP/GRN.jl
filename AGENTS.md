@@ -43,7 +43,7 @@ julia --project=docs docs/make.jl                          # build docs
 | `src/sample.jl` | Gibbs samplers and internal scalar random draws (allocation-free hot path) |
 | `src/estimate.jl` | `grn()` entry point, `_outputs()` collector |
 | `src/io.jl` | Output files: `makeout`, `write_output`, `flush_outputs`, `close_outputs`; TSV and binary writers |
-| `src/postanalysis.jl` | `accuracy`, `posterior_mean`, `posterior_inclusion_probability`, `derive_indicator`, `read_binary`, `preliminary_posterior` and `preliminary_column` (files still being written, built on `_scan_tsv_rows` / `_scan_bin_rows`) |
+| `src/postanalysis.jl` | `accuracy`, `posterior_mean`, `posterior_inclusion_probability`, `derive_indicator`, `read_binary`, `read_output`, `preliminary_posterior` and `preliminary_column` (files still being written, built on `_scan_tsv_rows` / `_scan_bin_rows`) |
 | `src/diagnostics.jl` | MCMC convergence diagnostics: `ess` (Vehtari et al. 2021; adapted from R `posterior`, BSD-3), internal `_qnorm`; validated against MCMCDiagnosticTools |
 | `THIRD_PARTY_NOTICES.md` | Attribution and license texts for adapted third-party code |
 | `src/simulate.jl` | `simulate()` — data from a known network, for tests and validation |
@@ -111,7 +111,8 @@ julia --project=docs docs/make.jl                          # build docs
 - Current testsets: input checks, prior selection, scalar samplers, simulate,
   fixed effects, prior insertion, analysis and output, compressed output,
   plain output, PIP and `derive_indicator`, binary output, preliminary
-  results, preliminary columns, effective sample size, allocations.
+  results, preliminary columns, read output into a matrix, effective
+  sample size, allocations.
 - Every new output file, output format, or post-analysis function needs a
   test.
 - Changes to the samplers must keep the effect-recovery tests (correlation

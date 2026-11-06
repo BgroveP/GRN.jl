@@ -474,6 +474,45 @@ function preliminary_posterior(path::AbstractString; delim::Char='\t')::NamedTup
 end
 
 """
+    read_output(path; delim='\\t')
+
+Read all complete iterations of an output file into a matrix with one row
+per iteration and one column per value. Works for `.tsv`, `.tsv.gz`, `.bin`,
+and `.bin.gz`, for finished files and for files of an analysis that is
+still running or was stopped (incomplete last rows are ignored, as in
+`preliminary_posterior`). Returns a 0 × 0 matrix when no iteration is
+complete yet.
+
+Meant for the small output files. The whole file is held in memory, so do
+not use it on effects files at large scale (one row of `G_effects` is
+`m * m` values); use `preliminary_column` or `preliminary_posterior` there.
+
+# Column layout
+ - `base_residual_variance`, `G_pi`, `G_variance`, `G_lambda2`, …: gene `c`
+   in column `c`.
+ - `base_fixedeffects`: the `p` coefficients of gene 1, then gene 2, …, so
+   coefficient `k` of gene `c` is in column `(c - 1) * p + k`. With the
+   default `X` (intercept only), column `c` is the intercept of gene `c`.
+
+# Example
+```julia
+Rvar = read_output("output/base_residual_variance.tsv.gz")   # iterations × m
+B = read_output("output/base_fixedeffects.tsv.gz")           # iterations × (p * m)
+B3 = B[:, (3 - 1) * p .+ (1:p)]                              # gene 3's coefficients
+```
+"""
+function read_output(path::AbstractString; delim::Char='\t')::Matrix{Float64}
+    vals = Float64[]
+    ncols = Ref(0)
+    nrows = _scan_rows(path, delim, nothing) do row
+        ncols[] = length(row)
+        append!(vals, row)
+    end
+    nrows == 0 && return zeros(Float64, 0, 0)
+    return permutedims(reshape(vals, ncols[], nrows))
+end
+
+"""
     preliminary_column(path, i; delim='\\t')
 
 Extract column `i` of an output file, one value per complete iteration, from

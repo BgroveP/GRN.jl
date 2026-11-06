@@ -25,7 +25,8 @@ sampled output files.
 complete iterations from an output file of an analysis that is still running
 or was stopped, ignoring a last row that was cut off mid-write.
 `preliminary_column(path, i)` extracts the trace of column `i` (or several
-columns) from such files.
+columns) from such files, and `read_output(path)` reads all iterations of a
+small output file (e.g. residual variances, fixed effects) into a matrix.
 
 ## Convergence diagnostics
 

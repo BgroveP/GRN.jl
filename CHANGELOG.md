@@ -25,6 +25,12 @@
   (`.bin.gz`), 2.6 s (`.tsv.gz`, vs 9.6 s for `preliminary_posterior`).
   `preliminary_posterior` and `preliminary_column` share new row scanners
   `_scan_tsv_rows` / `_scan_bin_rows` (`src/postanalysis.jl`)
+- `read_output(path; delim='\t')` — read all complete iterations of an
+  output file into an iterations × values matrix, e.g. for
+  `base_residual_variance` and `base_fixedeffects`. Works for all four
+  formats and for files of a running or stopped analysis (built on the same
+  row scanners as `preliminary_posterior`). Holds the whole file in memory,
+  so it is meant for the small per-gene files (`src/postanalysis.jl`)
 - `ess(x; kind=:bulk)` — effective sample size of MCMC draws (vector, or
   iterations × chains matrix), following Vehtari et al. (2021): split
   chains, Geyer's initial positive and monotone sequences, and `kind` =

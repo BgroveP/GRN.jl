@@ -774,6 +774,59 @@ end
         @test all(iszero, preliminary_column(joinpath(out, "G_effects.bin"), (c - 1) * m + c))
     end
 
+    @testset "Read output into a matrix" begin
+        testdir = mktempdir()
+        Random.seed!(13)
+        nr, nc = 20, 7
+        V = randn(nr, nc)
+
+        for (compress, format) in ((false, :tsv), (true, :tsv), (false, :bin), (true, :bin))
+            out = joinpath(testdir, "mat_$(compress)_$format")
+            vals = zeros(nc)
+            files = GRN.makeout(out, (x=vals,); compress=compress, format=format)
+            p = joinpath(out, only(readdir(out)))
+            try
+                @test size(read_output(p)) == (0, 0)          # nothing on disk yet
+                for r in 1:nr
+                    vals .= V[r, :]
+                    GRN.write_output(files[1])
+                end
+                GRN.flush_outputs(files)
+                foreach(o -> flush(o.io), files)
+                M = read_output(p)                             # file still open
+                @test size(M) == (nr, nc)
+                @test isapprox(M, V; rtol=1e-9)
+            finally
+                GRN.close_outputs(files)
+            end
+            @test isapprox(read_output(p), V; rtol=1e-9)
+            format === :bin && !compress && @test read_output(p) == GRN.read_binary(p)
+        end
+
+        # Last row cut off, no end-of-line
+        p = joinpath(testdir, "mat_false_tsv", "x.tsv")
+        bytes = read(p)
+        q = joinpath(testdir, "cut.tsv")
+        write(q, bytes[1:end-4])
+        @test isapprox(read_output(q), V[1:nr-1, :]; rtol=1e-9)
+
+        # Base outputs of a grn run: residual variance and fixed effects
+        m, n = 4, 60
+        sim = GRN.simulate(n=n, m=m, u=0, seed=5)
+        X = hcat(ones(n), randn(Xoshiro(1), n))
+        out = joinpath(testdir, "grnrun")
+        redirect_stdout(devnull) do
+            grn(sim.Y, 10:2:30; X=X, outpath=out)
+        end
+        Rvar = read_output(joinpath(out, "base_residual_variance.tsv.gz"))
+        @test size(Rvar) == (11, m)
+        @test all(>(0), Rvar)
+        B = read_output(joinpath(out, "base_fixedeffects.tsv.gz"))
+        @test size(B) == (11, 2 * m)
+        @test isapprox(vec(mean(B, dims=1)),
+            GRN.posterior_mean(joinpath(out, "base_fixedeffects.tsv.gz")); rtol=1e-9)
+    end
+
     @testset "Effective sample size" begin
         # Normal quantile function
         @test GRN._qnorm(0.5) == 0.0

@@ -91,6 +91,14 @@ rv3 = preliminary_column("grn_example/base_residual_variance.tsv.gz", 3)
 tr = preliminary_column("grn_example/G_effects.tsv.gz", [(7 - 1) * m + 2, (7 - 1) * m + 5])
 ```
 
+`read_output` reads all iterations of a (small) output file into a matrix
+with one row per iteration:
+
+```julia
+Rvar = read_output("grn_example/base_residual_variance.tsv.gz")   # iterations × genes
+B = read_output("grn_example/base_fixedeffects.tsv.gz")           # iterations × (p * genes)
+```
+
 Output is buffered, so the files on disk lag somewhat behind the sampler.
 
 ### Convergence diagnostics
