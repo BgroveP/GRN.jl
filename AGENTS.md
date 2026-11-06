@@ -43,7 +43,9 @@ julia --project=docs docs/make.jl                          # build docs
 | `src/sample.jl` | Gibbs samplers and internal scalar random draws (allocation-free hot path) |
 | `src/estimate.jl` | `grn()` entry point, `_outputs()` collector |
 | `src/io.jl` | Output files: `makeout`, `write_output`, `flush_outputs`, `close_outputs`; TSV and binary writers |
-| `src/postanalysis.jl` | `accuracy`, `posterior_mean`, `posterior_inclusion_probability`, `derive_indicator`, `read_binary`, `preliminary_posterior` (files still being written) |
+| `src/postanalysis.jl` | `accuracy`, `posterior_mean`, `posterior_inclusion_probability`, `derive_indicator`, `read_binary`, `preliminary_posterior` and `preliminary_column` (files still being written, built on `_scan_tsv_rows` / `_scan_bin_rows`) |
+| `src/diagnostics.jl` | MCMC convergence diagnostics: `ess` (Vehtari et al. 2021; adapted from R `posterior`, BSD-3), internal `_qnorm`; validated against MCMCDiagnosticTools |
+| `THIRD_PARTY_NOTICES.md` | Attribution and license texts for adapted third-party code |
 | `src/simulate.jl` | `simulate()` — data from a known network, for tests and validation |
 | `src/check.jl`, `src/utility.jl` | Input validation, helpers |
 | `test/runtests.jl` | Single test file, grouped in `@testset`s |
@@ -109,7 +111,7 @@ julia --project=docs docs/make.jl                          # build docs
 - Current testsets: input checks, prior selection, scalar samplers, simulate,
   fixed effects, prior insertion, analysis and output, compressed output,
   plain output, PIP and `derive_indicator`, binary output, preliminary
-  results, allocations.
+  results, preliminary columns, effective sample size, allocations.
 - Every new output file, output format, or post-analysis function needs a
   test.
 - Changes to the samplers must keep the effect-recovery tests (correlation
@@ -158,6 +160,38 @@ If a step was skipped or fails, say so explicitly.
 - Ask before adding a dependency. When adding one, update `Project.toml`
   `[deps]` and `[compat]`, then run `Pkg.resolve()`.
 
+## Third-party code and licenses
+
+GRN.jl is MIT-licensed. When code is ported from, translated from, or
+heavily inspired by another repository, keep that repository's license
+terms. A translation to Julia is still a derivative work.
+
+**Before porting**, check the source license:
+
+| Source license | What to do |
+|---|---|
+| MIT, BSD-2/3-Clause, ISC, zlib | Allowed. Add attribution as below; the copyright notice and license text must be kept. |
+| Apache-2.0 | Allowed. Attribution as below, and also carry over any `NOTICE` file content. |
+| GPL, LGPL, AGPL (including R itself and many CRAN packages) | **Do not copy or translate.** Implement from the published paper instead, and ask the user if unsure. |
+| No license, or non-commercial licenses | **Do not copy.** All rights reserved by default. Ask the user. |
+
+**Algorithms from papers** need no license: implement from the paper and
+cite it in the docstring (authors, year, journal).
+
+**When porting or heavily adapting code**, do all of the following:
+
+1. Add a comment at the top of the function or file:
+   `# Adapted from <project> (<license>), <URL>, <version or commit>`.
+2. Add an entry to `THIRD_PARTY_NOTICES.md`: project, URL, version, license,
+   copyright line, which GRN files/functions use it, and the full license
+   text (required for MIT and BSD).
+3. Mention it in the `CHANGELOG.md` entry.
+4. Tell the user in your summary which code is adapted and from where.
+
+Code only used for validation (e.g. comparing against another package in
+tests, without copying its code) needs no notice; mention the package in
+the docstring or test comment.
+
 ## Git
 
 - Work on a branch, not `main`, unless told otherwise. Commit only when asked.
@@ -189,4 +223,6 @@ If a step was skipped or fails, say so explicitly.
 - Changing a default (`compress`, `format`, prior hyperparameters, `X`).
 - Changing an output file name, the binary header, or the TSV row layout.
 - Adding a dependency, a new public export, or a new top-level directory.
+- Porting code from a GPL/LGPL/AGPL or unlicensed source, or whenever the
+  license of a source is unclear.
 - Anything that makes a hot-path function allocate.

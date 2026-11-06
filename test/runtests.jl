@@ -687,6 +687,161 @@ end
         end
     end
 
+    @testset "Preliminary columns" begin
+        testdir = mktempdir()
+        Random.seed!(12)
+        nr, nc = 30, 17
+        V = randn(nr, nc)
+        V[rand(nr, nc) .< 0.4] .= 0.0
+
+        # Write V in all four formats through makeout, as grn does
+        paths = String[]
+        for (compress, format) in ((false, :tsv), (true, :tsv), (false, :bin), (true, :bin))
+            out = joinpath(testdir, "cols_$(compress)_$format")
+            vals = zeros(nc)
+            files = GRN.makeout(out, (x=vals,); compress=compress, format=format)
+            for r in 1:nr
+                vals .= V[r, :]
+                GRN.write_output(files[1])
+            end
+            GRN.close_outputs(files)
+            push!(paths, joinpath(out, only(readdir(out))))
+        end
+
+        for p in paths
+            # Single column, first and last column
+            @test isapprox(preliminary_column(p, 5), V[:, 5]; rtol=1e-9)
+            @test isapprox(preliminary_column(p, 1), V[:, 1]; rtol=1e-9)
+            @test isapprox(preliminary_column(p, nc), V[:, nc]; rtol=1e-9)
+
+            # Several columns in the given order, with duplicates
+            idx = [9, 2, 9, 17]
+            tr = preliminary_column(p, idx)
+            @test size(tr) == (nr, 4)
+            @test isapprox(tr, V[:, idx]; rtol=1e-9)
+
+            # Out-of-range and non-positive columns
+            @test_throws ArgumentError preliminary_column(p, nc + 1)
+            @test_throws ArgumentError preliminary_column(p, 0)
+        end
+
+        # Unfinished files: only complete iterations
+        tsv, bin = paths[1], paths[3]
+        bytes = read(tsv)
+        q = joinpath(testdir, "cut.tsv")
+        write(q, bytes[1:end-5])                        # last row cut, no end-of-line
+        @test isapprox(preliminary_column(q, 3), V[1:nr-1, 3]; rtol=1e-9)
+        @test isapprox(preliminary_column(q, [nc, 1]), V[1:nr-1, [nc, 1]]; rtol=1e-9)
+
+        bytes = read(bin)
+        q = joinpath(testdir, "cut.bin")
+        write(q, bytes[1:end-4*8])                      # last row missing its last 4 values
+        @test isapprox(preliminary_column(q, 2), V[1:nr-1, 2]; rtol=1e-9)
+        @test isapprox(preliminary_column(q, nc), V[1:nr-1, nc]; rtol=1e-9)
+        write(q, bytes[1:10])                           # header incomplete
+        @test preliminary_column(q, 2) == Float64[]
+        @test size(preliminary_column(q, [1, 2])) == (0, 2)
+
+        for p in (paths[2], paths[4])                   # gzip without trailer
+            bytes = read(p)
+            q = joinpath(testdir, "trunc_" * basename(p))
+            write(q, bytes[1:end-30])
+            tr = preliminary_column(q, [4, 11])
+            k = size(tr, 1)
+            @test 0 < k <= nr
+            @test isapprox(tr, V[1:k, [4, 11]]; rtol=1e-9)
+            @test k == preliminary_posterior(q).iterations
+        end
+
+        # Rows wider than the 1 MB read chunk
+        W = randn(4, 60_000)
+        q = joinpath(testdir, "wide.tsv")
+        write(q, join((join((@sprintf("%.17g", x) for x in W[r, :]), '\t') * "\n" for r in 1:4)))
+        @test preliminary_column(q, [1, 30_000, 60_000]) == W[:, [1, 30_000, 60_000]]
+
+        # Column layout of an effects file from grn: effect of q on gene c
+        # is column (c - 1) * m + q
+        m = 5
+        sim = GRN.simulate(n=50, m=m, u=0, seed=3)
+        out = joinpath(testdir, "grnrun")
+        redirect_stdout(devnull) do
+            grn(sim.Y, 10:2:30; outpath=out, format=:bin, compress=false)
+        end
+        Gall = GRN.read_binary(joinpath(out, "G_effects.bin"))
+        c, q = 4, 2
+        @test preliminary_column(joinpath(out, "G_effects.bin"), (c - 1) * m + q) ==
+            Gall[:, (c - 1) * m + q]
+        @test all(iszero, preliminary_column(joinpath(out, "G_effects.bin"), (c - 1) * m + c))
+    end
+
+    @testset "Effective sample size" begin
+        # Normal quantile function
+        @test GRN._qnorm(0.5) == 0.0
+        @test GRN._qnorm(0.975) ≈ 1.959963984540054 rtol = 1e-14
+        @test GRN._qnorm(1e-10) ≈ -6.361340902404056 rtol = 1e-14
+        @test GRN._qnorm(0.3) ≈ -GRN._qnorm(0.7) rtol = 1e-14
+
+        # Reference values from MCMCDiagnosticTools.ess(...; maxlag=typemax(Int))
+        # on a deterministic two-chain input with ties at zero
+        t = 1:301
+        x = hcat(sin.(0.3 .* t) .+ 0.5 .* cos.(37.0 .* t),
+            cos.(0.25 .* t) .+ 0.5 .* sin.(41.0 .* t) .+ 0.1)
+        x[x .< -0.6] .= 0.0
+        @test ess(x) ≈ 144.54420517595005 rtol = 1e-10
+        @test ess(x; kind=:tail) ≈ 372.493765673391 rtol = 1e-10
+        @test ess(x; kind=:basic) ≈ 131.37705984571465 rtol = 1e-10
+
+        # Independent draws: ESS close to the number of draws
+        rng = Xoshiro(21)
+        iid = randn(rng, 4000, 4)
+        @test 0.85 * 16000 < ess(iid) < 1.15 * 16000
+
+        # AR(1) with rho = 0.9: ESS close to S * (1 - rho) / (1 + rho)
+        ar = zeros(5000, 4)
+        for j in 1:4
+            ar[1, j] = randn(rng)
+            for i in 2:5000
+                ar[i, j] = 0.9 * ar[i-1, j] + sqrt(1 - 0.81) * randn(rng)
+            end
+        end
+        expected = 20000 * 0.1 / 1.9
+        @test 0.75 * expected < ess(ar; kind=:basic) < 1.25 * expected
+
+        # Bulk ESS is rank based: invariant to monotone transformations
+        @test ess(exp.(ar)) ≈ ess(ar)
+
+        # A drifting chain has a low ESS because the chain is split
+        drift = collect(range(0, 10, length=2000)) .+ 0.1 .* randn(rng, 2000)
+        @test ess(drift) < 50
+
+        # Vector input, Bool input (inclusion indicators), undefined cases
+        @test ess(ar[:, 1]) == ess(reshape(ar[:, 1], :, 1))
+        @test isfinite(ess(ar[:, 1] .> 0.0; kind=:basic))
+        @test isnan(ess(zeros(100)))                    # constant
+        @test isnan(ess(randn(rng, 9)))                 # too short
+        @test isnan(ess([1.0, 2.0, NaN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]))
+        @test_throws ArgumentError ess(iid; kind=:foo)
+
+        # From files, one or several chains
+        testdir = mktempdir()
+        V = randn(rng, 300, 6)
+        paths = String[]
+        for (k, nr) in enumerate((300, 250))           # second chain is shorter
+            out = joinpath(testdir, "chain$k")
+            vals = zeros(6)
+            files = GRN.makeout(out, (x=vals,); compress=true, format=:bin)
+            for r in 1:nr
+                vals .= V[r, :] .+ k
+                GRN.write_output(files[1])
+            end
+            GRN.close_outputs(files)
+            push!(paths, joinpath(out, "x.bin.gz"))
+        end
+        @test ess(paths[1], 3) == ess(V[:, 3] .+ 1)
+        @test ess(paths[1], [3, 5]; kind=:tail) == [ess(V[:, c] .+ 1; kind=:tail) for c in (3, 5)]
+        @test ess(paths, 2) == ess(hcat(V[1:250, 2] .+ 1, V[1:250, 2] .+ 2))
+    end
+
     @testset "Allocations" begin
         # The per-gene Gibbs updates must not allocate
         Random.seed!(4)

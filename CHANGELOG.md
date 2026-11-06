@@ -15,6 +15,35 @@
   chunks, so memory is one row of values rather than one row of text. Works
   for `.tsv`, `.tsv.gz`, `.bin`, `.bin.gz`, and `\r\n` line endings
   (`src/postanalysis.jl`)
+- `preliminary_column(path, i; delim='\t')` — the trace of column `i`
+  (one value per complete iteration) from an output file of a run that is
+  still going or was stopped. `i` may be a vector of columns, returning an
+  iterations × columns matrix from one pass over the file. Handles unfinished
+  files like `preliminary_posterior`. Only the requested fields are parsed in
+  text files, and binary files skip unrequested values without holding a
+  row in memory. Measured on a 40 × 1M file: 0.09 s (`.bin`), 0.8 s
+  (`.bin.gz`), 2.6 s (`.tsv.gz`, vs 9.6 s for `preliminary_posterior`).
+  `preliminary_posterior` and `preliminary_column` share new row scanners
+  `_scan_tsv_rows` / `_scan_bin_rows` (`src/postanalysis.jl`)
+- `ess(x; kind=:bulk)` — effective sample size of MCMC draws (vector, or
+  iterations × chains matrix), following Vehtari et al. (2021): split
+  chains, Geyer's initial positive and monotone sequences, and `kind` =
+  `:bulk` (rank-normalized, default), `:tail` (5%/95% quantile indicators),
+  or `:basic`. File methods `ess(path_or_paths, i)` read column(s) `i` with
+  `preliminary_column`, so running analyses and several independent chains
+  can be diagnosed directly. Agrees with
+  `MCMCDiagnosticTools.ess(...; maxlag=typemax(Int))` to ~1e-14 on the
+  tested cases (i.i.d., AR(1), antithetic, ties at zero, heavy tails, odd
+  lengths, short chains). No new dependency: the normal quantile function
+  for rank normalization is implemented internally (`_qnorm`, AS 241).
+  0.16 s for a 100,000-iteration chain with autocorrelation 0.999. The ESS
+  computation is adapted from the R package `posterior` (BSD-3-Clause);
+  attribution and license text are in `THIRD_PARTY_NOTICES.md`
+  (`src/diagnostics.jl`)
+- `THIRD_PARTY_NOTICES.md` for attribution and license texts of adapted
+  third-party code, and a "Third-party code and licenses" section in
+  `AGENTS.md` describing when and how to add entries (`AGENTS.md`,
+  `THIRD_PARTY_NOTICES.md`)
 - `Zlib_jll` added as a direct dependency (already a dependency of GZip) for
   reading unfinished gzip files (`Project.toml`, `src/GRN.jl`)
 

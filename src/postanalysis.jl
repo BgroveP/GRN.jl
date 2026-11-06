@@ -157,22 +157,23 @@ function _open_partial(path::AbstractString)::Union{IOStream, _PartialGz}
 end
 
 """
-    _read_partial!(src, buf)
+    _read_partial!(src, buf, nb=length(buf))
 
-Read bytes into `buf` until it is full or the end of the available data is
-reached. Returns the number of bytes read; fewer than `length(buf)` means the
+Read `nb` bytes into the start of `buf`, or fewer if the end of the available
+data is reached. Returns the number of bytes read; fewer than `nb` means the
 end of the data written so far. A gzip stream that ends without a trailer is
 treated as the end of the data, not as an error.
 """
-function _read_partial!(src::IOStream, buf::Vector{UInt8})::Int
-    return readbytes!(src, buf, length(buf))
+function _read_partial!(src::IOStream, buf::Vector{UInt8}, nb::Int=length(buf))::Int
+    return readbytes!(src, buf, nb)
 end
 
-function _read_partial!(src::_PartialGz, buf::Vector{UInt8})::Int
+function _read_partial!(src::_PartialGz, buf::Vector{UInt8}, nb::Int=length(buf))::Int
+    nb <= length(buf) || throw(ArgumentError("nb = $nb exceeds the buffer length"))
     nr = 0
-    while nr < length(buf)
+    while nr < nb
         # gzread returns a C int, so read at most 1 GiB per call
-        len = min(length(buf) - nr, 1 << 30)
+        len = min(nb - nr, 1 << 30)
         ret = ccall((:gzread, libz), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Cuint),
             src.file, pointer(buf) + nr, len)
         ret < 0 && error("Corrupt gzip data (zlib gzread returned $ret)")
@@ -220,46 +221,109 @@ function _preliminary_result(sums::Vector{Float64}, counts::Vector{Int},
 end
 
 """
-    _preliminary_bin(path)
+    _skip_partial!(src, nb, scratch)
 
-Posterior summaries from the complete rows of a binary output file that may
-still be written. A missing or incomplete header gives zero rows, and an
-incomplete last row is ignored.
+Read and discard `nb` bytes through `scratch`. Returns `false` if the
+available data ended first.
 """
-function _preliminary_bin(path::AbstractString)::NamedTuple
+function _skip_partial!(src::Union{IOStream, _PartialGz}, nb::Int,
+    scratch::Vector{UInt8})::Bool
+    while nb > 0
+        m = min(nb, length(scratch))
+        _read_partial!(src, scratch, m) == m || return false
+        nb -= m
+    end
+    return true
+end
+
+"""
+    _check_columns(cols, ncols, path)
+
+Throw an `ArgumentError` if a requested column (sorted, unique) is beyond the
+`ncols` values per row of the file.
+"""
+function _check_columns(cols::Union{Nothing, Vector{Int}}, ncols::Int,
+    path::AbstractString)::Nothing
+    (cols === nothing || isempty(cols) || cols[end] <= ncols) || throw(ArgumentError(
+        "Column $(cols[end]) requested, but $path has $ncols values per row"))
+    return nothing
+end
+
+"""
+    _scan_bin_rows(onrow!, path, cols)
+
+Call `onrow!(row)` for each complete row of a binary output file that may
+still be written, and return the number of rows. With `cols === nothing`,
+`row` holds all values of the row; otherwise it holds the values of the
+sorted, unique columns `cols`, and the other values are skipped without
+being stored. A missing or incomplete header gives zero rows, and an
+incomplete last row is ignored. `row` is reused between calls.
+"""
+function _scan_bin_rows(onrow!::F, path::AbstractString,
+    cols::Union{Nothing, Vector{Int}})::Int where {F}
     src = _open_partial(path)
     try
         hdr = Vector{UInt8}(undef, _BIN_HEADER_SIZE)
-        _read_partial!(src, hdr) < _BIN_HEADER_SIZE &&
-            return _preliminary_result(Float64[], Int[], 0)
+        _read_partial!(src, hdr) < _BIN_HEADER_SIZE && return 0
         ncols = _read_bin_header(IOBuffer(hdr))
-
-        rowbytes = Vector{UInt8}(undef, ncols * sizeof(Float64))
-        row = reinterpret(Float64, rowbytes)
-        sums = zeros(Float64, ncols)
-        counts = zeros(Int, ncols)
+        _check_columns(cols, ncols, path)
         nrows = 0
-        while _read_partial!(src, rowbytes) == length(rowbytes)
-            _accumulate!(sums, counts, row)
-            nrows += 1
+
+        if cols === nothing
+            # Whole rows
+            rowbytes = Vector{UInt8}(undef, ncols * sizeof(Float64))
+            row = reinterpret(Float64, rowbytes)
+            while _read_partial!(src, rowbytes) == length(rowbytes)
+                onrow!(row)
+                nrows += 1
+            end
+        else
+            # Selected columns: read 8 bytes per wanted value, skip the rest
+            row = zeros(Float64, length(cols))
+            val = zeros(Float64, 1)
+            valbytes = Vector{UInt8}(undef, sizeof(Float64))
+            scratch = Vector{UInt8}(undef, min(_BUFSIZE, ncols * sizeof(Float64)))
+            while true
+                pos = 0  # values of the current row consumed so far
+                complete = true
+                for k in eachindex(cols)
+                    j = cols[k]
+                    if !_skip_partial!(src, (j - 1 - pos) * sizeof(Float64), scratch) ||
+                       _read_partial!(src, valbytes) < sizeof(Float64)
+                        complete = false
+                        break
+                    end
+                    copyto!(val, reinterpret(Float64, valbytes))
+                    row[k] = val[1]
+                    pos = j
+                end
+                complete = complete &&
+                    _skip_partial!(src, (ncols - pos) * sizeof(Float64), scratch)
+                complete || break
+                onrow!(row)
+                nrows += 1
+            end
         end
-        return _preliminary_result(sums, counts, nrows)
+        return nrows
     finally
         _close_partial(src)
     end
 end
 
 """
-    _preliminary_tsv(path, delim)
+    _scan_tsv_rows(onrow!, path, delim, cols)
 
-Posterior summaries from the complete rows of a text output file that may
-still be written. Only rows terminated by an end-of-line character are used;
-an unterminated last row (possibly cut mid-number) is ignored. The file is
-parsed in 1 MB chunks, so memory use is one row of values plus the
-accumulators, not one row of text. Blank lines and `\\r\\n` line endings are
-accepted.
+Call `onrow!(row)` for each complete row of a text output file that may
+still be written, and return the number of rows. Only rows terminated by an
+end-of-line character are used; an unterminated last row (possibly cut
+mid-number) is ignored. With `cols === nothing`, `row` holds all values of
+the row; otherwise it holds the values of the sorted, unique columns `cols`,
+and only those fields are parsed. The file is read in 1 MB chunks, so memory
+use is one row of values, not one row of text. Blank lines and `\\r\\n` line
+endings are accepted. `row` is reused between calls.
 """
-function _preliminary_tsv(path::AbstractString, delim::Char)::NamedTuple
+function _scan_tsv_rows(onrow!::F, path::AbstractString, delim::Char,
+    cols::Union{Nothing, Vector{Int}})::Int where {F}
     isascii(delim) && delim != '\n' || throw(ArgumentError(
         "delim must be an ASCII character other than newline, got $(repr(delim))"))
     d = UInt8(delim)
@@ -268,11 +332,10 @@ function _preliminary_tsv(path::AbstractString, delim::Char)::NamedTuple
     src = _open_partial(path)
     chunk = Vector{UInt8}(undef, _BUFSIZE)
     carry = UInt8[]     # bytes of a field that continues in the next chunk
-    row = Float64[]     # values of the current row
-    sums = Float64[]
-    counts = Int[]
+    row = cols === nothing ? Float64[] : zeros(Float64, length(cols))
     ncols = 0           # values per row, set by the first complete row
     col = 0             # values read so far in the current row
+    k = 1               # next wanted entry of `cols`
     nrows = 0
 
     try
@@ -296,35 +359,39 @@ function _preliminary_tsv(path::AbstractString, delim::Char)::NamedTuple
                 end
                 start = i + 1
 
-                v = tryparse(Float64, field)
-                if v === nothing
-                    # Skip blank lines; anything else is malformed
-                    b == nl && col == 0 && all(isspace, field) && continue
-                    error("Non-numeric value $(repr(field)) in row $(nrows + 1) of $path")
-                end
+                # Skip blank lines
+                b == nl && col == 0 && all(isspace, field) && continue
 
                 col += 1
-                if nrows == 0
-                    push!(row, v)
-                else
-                    col <= ncols || error(
-                        "Row $(nrows + 1) of $path has more than $ncols values")
-                    @inbounds row[col] = v
+                nrows > 0 && col > ncols && error(
+                    "Row $(nrows + 1) of $path has more than $ncols values")
+
+                # Parse the field if it is wanted
+                if cols === nothing || (k <= length(cols) && @inbounds(cols[k]) == col)
+                    v = tryparse(Float64, field)
+                    v === nothing && error(
+                        "Non-numeric value $(repr(field)) in row $(nrows + 1) of $path")
+                    if cols === nothing
+                        nrows == 0 ? push!(row, v) : (@inbounds row[col] = v)
+                    else
+                        @inbounds row[k] = v
+                        k += 1
+                    end
                 end
 
                 # End of line: the row is complete
                 if b == nl
                     if nrows == 0
                         ncols = col
-                        sums = zeros(Float64, ncols)
-                        counts = zeros(Int, ncols)
+                        _check_columns(cols, ncols, path)
                     else
                         col == ncols || error(
                             "Row $(nrows + 1) of $path has $col values, expected $ncols")
                     end
-                    _accumulate!(sums, counts, row)
+                    onrow!(row)
                     nrows += 1
                     col = 0
+                    k = 1
                 end
             end
             append!(carry, view(chunk, start:n))
@@ -335,7 +402,18 @@ function _preliminary_tsv(path::AbstractString, delim::Char)::NamedTuple
 
     # Values in `row` and bytes in `carry` belong to an unterminated last row
     # and are dropped
-    return _preliminary_result(sums, counts, nrows)
+    return nrows
+end
+
+"""
+    _scan_rows(onrow!, path, delim, cols)
+
+Dispatch to `_scan_bin_rows` or `_scan_tsv_rows` by file extension.
+"""
+function _scan_rows(onrow!::F, path::AbstractString, delim::Char,
+    cols::Union{Nothing, Vector{Int}})::Int where {F}
+    return _is_binary(path) ? _scan_bin_rows(onrow!, path, cols) :
+        _scan_tsv_rows(onrow!, path, delim, cols)
 end
 
 """
@@ -381,7 +459,74 @@ G_pip = reshape(res.pip, m, m)
 ```
 """
 function preliminary_posterior(path::AbstractString; delim::Char='\t')::NamedTuple
-    return _is_binary(path) ? _preliminary_bin(path) : _preliminary_tsv(path, delim)
+    # Accumulators are sized on the first row; they are filled in place (not
+    # reassigned) so the closure does not box them
+    sums = Float64[]
+    counts = Int[]
+    nrows = _scan_rows(path, delim, nothing) do row
+        if isempty(sums)
+            append!(sums, zeros(Float64, length(row)))
+            append!(counts, zeros(Int, length(row)))
+        end
+        _accumulate!(sums, counts, row)
+    end
+    return _preliminary_result(sums, counts, nrows)
+end
+
+"""
+    preliminary_column(path, i; delim='\\t')
+
+Extract column `i` of an output file, one value per complete iteration, from
+an analysis that may still be running or was stopped. This is the trace of
+one parameter, e.g. for trace plots or convergence diagnostics.
+
+`i` can be an integer, which returns a `Vector{Float64}`, or a vector of
+integers, which returns a `Matrix{Float64}` with one row per iteration and
+one column per entry of `i` (in the given order, duplicates allowed). Give
+all wanted columns in one call: each call is one pass over the file.
+
+Incomplete iterations are handled as in `preliminary_posterior`: a last row
+without an end-of-line character, an incomplete binary row, a binary header
+not yet on disk, and a gzip stream without a trailer are all accepted, and
+only complete iterations are returned. Only the requested fields are parsed
+in text files, and only the requested values are read into memory from
+binary files, so a single trace can be extracted from very wide files.
+Values in unrequested columns of text files are not checked for being
+numeric.
+
+# Column layout
+Each row of an effects file holds the effects of gene 1, then gene 2, and
+so on. The effect of predictor `q` on gene `c` is in column
+`(c - 1) * p + q`, where `p` is the number of genes for `G_effects` and the
+number of marker loci for `Q_effects`. Per-gene files (`G_pi`,
+`base_residual_variance`, …) have gene `c` in column `c`.
+
+# Example
+```julia
+# Trace of the residual variance of gene 3
+rv3 = preliminary_column("output/base_residual_variance.tsv.gz", 3)
+
+# Traces of the effects of gene 2 and gene 5 on gene 7, with m genes
+tr = preliminary_column("output/G_effects.bin", [(7 - 1) * m + 2, (7 - 1) * m + 5])
+size(tr)   # (iterations, 2)
+```
+"""
+function preliminary_column(path::AbstractString, i::Integer; delim::Char='\t')::Vector{Float64}
+    return vec(preliminary_column(path, [i]; delim=delim))
+end
+
+function preliminary_column(path::AbstractString, i::AbstractVector{<:Integer};
+    delim::Char='\t')::Matrix{Float64}
+    all(>=(1), i) || throw(ArgumentError("Column indices must be positive, got $i"))
+
+    # Read the sorted, unique columns in one pass, then map back to the given order
+    cols = sort!(unique(Int.(i)))
+    vals = Float64[]
+    nrows = _scan_rows(path, delim, cols) do row
+        append!(vals, row)
+    end
+    traces = permutedims(reshape(vals, length(cols), nrows))
+    return traces[:, [searchsortedfirst(cols, j) for j in i]]
 end
 
 # --- Public post-analysis functions (auto-detect binary vs TSV) ---

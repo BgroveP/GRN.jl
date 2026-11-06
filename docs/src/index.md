@@ -24,3 +24,11 @@ sampled output files.
 `preliminary_posterior(path)` returns the posterior mean, PIP, and number of
 complete iterations from an output file of an analysis that is still running
 or was stopped, ignoring a last row that was cut off mid-write.
+`preliminary_column(path, i)` extracts the trace of column `i` (or several
+columns) from such files.
+
+## Convergence diagnostics
+
+`ess(x; kind=:bulk)` computes the effective sample size of a trace or of
+several chains (Vehtari et al. 2021), and `ess(paths, i)` does so directly
+from output files.

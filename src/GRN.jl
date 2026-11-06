@@ -19,6 +19,7 @@ const _BUFSIZE = 1 << 20
 
 # Includes
 include("postanalysis.jl")
+include("diagnostics.jl")
 include("priors.jl")
 include("initialize.jl")
 include("check.jl")
@@ -32,6 +33,7 @@ include("utility.jl")
 export grn, simulate
 export SpikeSlab, Ridge, Laplace
 export accuracy, posterior_mean, posterior_inclusion_probability, derive_indicator
-export read_binary, preliminary_posterior
+export read_binary, preliminary_posterior, preliminary_column
+export ess
 
 end

@@ -81,4 +81,28 @@ res.mean         # posterior mean of each effect
 res.pip          # posterior inclusion probability of each effect
 ```
 
+`preliminary_column` extracts the trace of one or more columns, for example
+for trace plots. The effect of predictor `q` on gene `c` is in column
+`(c - 1) * p + q`, with `p` the number of genes (`G_effects`) or marker loci
+(`Q_effects`):
+
+```julia
+rv3 = preliminary_column("grn_example/base_residual_variance.tsv.gz", 3)
+tr = preliminary_column("grn_example/G_effects.tsv.gz", [(7 - 1) * m + 2, (7 - 1) * m + 5])
+```
+
 Output is buffered, so the files on disk lag somewhat behind the sampler.
+
+### Convergence diagnostics
+
+`ess` computes the effective sample size (bulk, tail, or basic; Vehtari et
+al. 2021) from a trace, a matrix of chains, or directly from output files:
+
+```julia
+ess("grn_example/G_pi.tsv.gz", 1:m)              # bulk ESS of every gene's pi
+ess(["run1/G_pi.bin", "run2/G_pi.bin"], 4)        # two independent chains
+ess(preliminary_column("grn_example/G_effects.tsv.gz", 12) .!= 0; kind=:basic)  # inclusion indicator
+```
+
+`MCMCDiagnosticTools` also exports `ess`; if both packages are loaded, call
+`GRN.ess`.
