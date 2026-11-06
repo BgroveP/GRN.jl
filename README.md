@@ -67,3 +67,18 @@ The analysis writes one tab-separated file (`.tsv`) per output parameter to the
 supplied, files are prefixed with `G_` for gene-gene effects and `Q_` for
 marker-gene effects (for example `G_effects.tsv` and `Q_effects.tsv`); without
 genotype data only the `G_` and base files are created.
+
+### Preliminary results
+
+`preliminary_posterior` summarizes an output file while the analysis is still
+running, or after it was stopped. It uses only complete iterations and
+ignores a last row that was cut off mid-write:
+
+```julia
+res = preliminary_posterior("grn_example/G_effects.tsv.gz")
+res.iterations   # complete iterations on disk so far
+res.mean         # posterior mean of each effect
+res.pip          # posterior inclusion probability of each effect
+```
+
+Output is buffered, so the files on disk lag somewhat behind the sampler.

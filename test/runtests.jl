@@ -5,6 +5,7 @@ using Statistics
 using Test
 using GZip
 using DelimitedFiles
+using Printf
 
 # Helper: read an output file as a matrix with a given number of values per line.
 # Handles both plain .tsv and gzip-compressed .tsv.gz files.
@@ -549,6 +550,141 @@ end
         # Binary write of 25 Float64 should allocate very little
         # (buffer flush may allocate when crossing _BUFSIZE threshold)
         @test alloc < 4096  # generous bound for buffer management
+    end
+
+    @testset "Preliminary results" begin
+        testdir = mktempdir()
+        Random.seed!(11)
+        nr, nc = 40, 25
+        V = randn(nr, nc)
+        V[rand(nr, nc) .< 0.4] .= 0.0           # spike-and-slab-like zeros
+        fmt(r) = join((@sprintf("%.10g", x) for x in V[r, :]), '\t')
+        ref(k) = (vec(mean(V[1:k, :], dims=1)), vec(mean(V[1:k, :] .!= 0.0, dims=1)))
+
+        # Finished plain file: equals posterior_mean and PIP
+        p = joinpath(testdir, "full.tsv")
+        write(p, join((fmt(r) * "\n" for r in 1:nr)))
+        res = preliminary_posterior(p)
+        @test res.iterations == nr
+        @test res.mean ≈ GRN.posterior_mean(p)
+        @test res.pip ≈ GRN.posterior_inclusion_probability(p)
+
+        # Last row cut mid-number, no end-of-line: the row is dropped
+        p = joinpath(testdir, "cut.tsv")
+        lastrow = fmt(nr)
+        write(p, join((fmt(r) * "\n" for r in 1:nr-1)) * lastrow[1:div(length(lastrow), 2)])
+        res = preliminary_posterior(p)
+        @test res.iterations == nr - 1
+        @test res.mean ≈ ref(nr - 1)[1]
+        @test res.pip ≈ ref(nr - 1)[2]
+
+        # Complete last row without end-of-line is also dropped (cannot be
+        # told apart from a row cut exactly at a value boundary)
+        p = joinpath(testdir, "noeol.tsv")
+        write(p, join((fmt(r) for r in 1:nr), '\n'))
+        @test preliminary_posterior(p).iterations == nr - 1
+
+        # CRLF line endings and blank lines
+        p = joinpath(testdir, "crlf.tsv")
+        write(p, "\r\n" * join((fmt(r) * "\r\n" for r in 1:nr)) * "\r\n")
+        res = preliminary_posterior(p)
+        @test res.iterations == nr
+        @test res.mean ≈ ref(nr)[1]
+
+        # Rows longer than the 1 MB read chunk: fields split across chunks
+        W = randn(6, 60_000)
+        p = joinpath(testdir, "wide.tsv")
+        write(p, join((join((@sprintf("%.10g", x) for x in W[r, :]), '\t') * "\n" for r in 1:6)))
+        @test filesize(p) > 2 * GRN._BUFSIZE
+        res = preliminary_posterior(p)
+        @test res.iterations == 6
+        @test res.mean ≈ vec(mean(W, dims=1))
+
+        # Gzip stream without trailer (truncated): complete rows before the cut
+        p = joinpath(testdir, "full.tsv.gz")
+        GZip.open(p, "w", 1) do io
+            for r in 1:nr
+                write(io, fmt(r) * "\n")
+            end
+        end
+        @test preliminary_posterior(p).iterations == nr
+        bytes = read(p)
+        q = joinpath(testdir, "trunc.tsv.gz")
+        write(q, bytes[1:end-30])
+        res = preliminary_posterior(q)
+        @test 0 < res.iterations < nr
+        @test res.mean ≈ ref(res.iterations)[1]
+        @test res.pip ≈ ref(res.iterations)[2]
+
+        # Empty file and malformed values
+        p = joinpath(testdir, "empty.tsv")
+        write(p, "")
+        res = preliminary_posterior(p)
+        @test res.iterations == 0 && isempty(res.mean) && isempty(res.pip)
+        p = joinpath(testdir, "bad.tsv")
+        write(p, "1.0\tx\n")
+        @test_throws ErrorException preliminary_posterior(p)
+        p = joinpath(testdir, "ragged.tsv")
+        write(p, "1.0\t2.0\n1.0\n")
+        @test_throws ErrorException preliminary_posterior(p)
+
+        # Binary: incomplete last row, missing header, truncated gzip
+        for compress in (false, true)
+            ext = compress ? ".bin.gz" : ".bin"
+            out = joinpath(testdir, "bin$compress")
+            vals = zeros(nc)
+            files = GRN.makeout(out, (x=vals,); compress=compress, format=:bin)
+            for r in 1:nr
+                vals .= V[r, :]
+                GRN.write_output(files[1])
+            end
+            GRN.close_outputs(files)
+            p = joinpath(out, "x$ext")
+            res = preliminary_posterior(p)
+            @test res.iterations == nr
+            @test res.mean ≈ ref(nr)[1]
+            @test res.pip ≈ ref(nr)[2]
+
+            if !compress
+                bytes = read(p)
+                q = joinpath(testdir, "partialrow.bin")
+                write(q, bytes[1:end-3*8])
+                @test preliminary_posterior(q).iterations == nr - 1
+                write(q, bytes[1:10])
+                @test preliminary_posterior(q).iterations == 0
+            else
+                bytes = read(p)
+                q = joinpath(testdir, "trunc.bin.gz")
+                write(q, bytes[1:end-30])
+                res = preliminary_posterior(q)
+                @test 0 < res.iterations <= nr
+                @test res.mean ≈ ref(res.iterations)[1]
+            end
+        end
+
+        # Files of a running analysis: written through makeout and still open
+        for (compress, format) in ((true, :tsv), (false, :tsv), (true, :bin), (false, :bin))
+            out = joinpath(testdir, "running_$(compress)_$format")
+            vals = zeros(nc)
+            files = GRN.makeout(out, (x=vals,); compress=compress, format=format)
+            p = joinpath(out, only(readdir(out)))
+            try
+                @test preliminary_posterior(p).iterations == 0   # nothing flushed yet
+                for r in 1:nr
+                    vals .= V[r, :]
+                    GRN.write_output(files[1])
+                end
+                # Rows reach the disk only after the 1 MB buffer and the
+                # stream's own buffer (IOStream or zlib) are flushed
+                GRN.flush_outputs(files)
+                foreach(o -> flush(o.io), files)
+                res = preliminary_posterior(p)
+                @test res.iterations == nr
+                @test res.mean ≈ ref(nr)[1]
+            finally
+                GRN.close_outputs(files)
+            end
+        end
     end
 
     @testset "Allocations" begin

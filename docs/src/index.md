@@ -20,3 +20,7 @@ The prior for each effect group is selectable per relation type:
 Use the functions in `GRN.postanalysis` (`accuracy`, `posterior_mean`,
 `posterior_inclusion_probability`, `derive_indicator`) to summarize the
 sampled output files.
+
+`preliminary_posterior(path)` returns the posterior mean, PIP, and number of
+complete iterations from an output file of an analysis that is still running
+or was stopped, ignoring a last row that was cut off mid-write.

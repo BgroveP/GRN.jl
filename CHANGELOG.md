@@ -4,6 +4,20 @@
 
 ### Added
 
+- `preliminary_posterior(path; delim='\t')` — posterior mean, PIP, and the
+  number of complete iterations from an output file of a run that is still
+  going or was stopped. Returns `(mean, pip, iterations)` in one pass. Rows
+  without an end-of-line character (cut mid-write) and incomplete binary
+  rows are ignored; a binary header not yet on disk gives zero iterations;
+  gzip streams without a trailer are read up to the last decompressible
+  data (GZip.jl throws `ZError(-5)` on these and discards what it read, so
+  they are read with zlib's `gzread` directly). Text is parsed in 1 MB
+  chunks, so memory is one row of values rather than one row of text. Works
+  for `.tsv`, `.tsv.gz`, `.bin`, `.bin.gz`, and `\r\n` line endings
+  (`src/postanalysis.jl`)
+- `Zlib_jll` added as a direct dependency (already a dependency of GZip) for
+  reading unfinished gzip files (`Project.toml`, `src/GRN.jl`)
+
 - Binary output format (`format=:bin`) — `grn()` and `makeout()` now accept
   `format=:tsv` (default) or `format=:bin`. Binary files store raw Float64
   bytes with a 16-byte header (magic `"GRNB"`, version, ncols), no text
@@ -49,6 +63,11 @@
 - `grn(Y, chain; ...)` convenience method: `X=nothing` now defaults to
   `ones(n, 1)` (intercept only) instead of passing `nothing` to the main
   method, which expected `Matrix{Float64}` (`src/estimate.jl`)
+- `AGENTS.md` rewritten in a standard structure (overview, commands, layout,
+  key decisions, style, testing, definition of done, changelog, git, gotchas,
+  ask-first list) and brought up to date with binary output, `simulate()`,
+  and fixed effects. `/out/` added to `.gitignore` as the scratch output
+  folder (`AGENTS.md`, `.gitignore`)
 
 ### Performance
 

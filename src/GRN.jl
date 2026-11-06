@@ -8,6 +8,7 @@ using Random
 using Statistics
 using DelimitedFiles
 using GZip
+using Zlib_jll: libz
 
 # Set number of BLAS threads to one
 BLAS.set_num_threads(1)
@@ -31,6 +32,6 @@ include("utility.jl")
 export grn, simulate
 export SpikeSlab, Ridge, Laplace
 export accuracy, posterior_mean, posterior_inclusion_probability, derive_indicator
-export read_binary
+export read_binary, preliminary_posterior
 
 end
