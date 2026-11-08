@@ -194,6 +194,22 @@ _close_partial(src::_PartialGz)::Nothing =
     (ccall((:gzclose, libz), Cint, (Ptr{Cvoid},), src.file); nothing)
 
 """
+    _partial_clean(src)
+
+After reading to the end of the available data, return `true` if the source
+ended cleanly. A plain file always does. For a gzip file, zlib reports
+`Z_OK` when the last gzip stream was finished (trailer present) and
+`Z_BUF_ERROR` when the data ended inside a stream, i.e. the file is still
+being written or the writing process was stopped before closing it.
+"""
+_partial_clean(::IOStream)::Bool = true
+function _partial_clean(src::_PartialGz)::Bool
+    err = Ref{Cint}(0)
+    ccall((:gzerror, libz), Cstring, (Ptr{Cvoid}, Ref{Cint}), src.file, err)
+    return err[] == 0
+end
+
+"""
     _accumulate!(sums, counts, row)
 
 Add one complete row to the running sums and non-zero counts.
@@ -250,7 +266,7 @@ function _check_columns(cols::Union{Nothing, Vector{Int}}, ncols::Int,
 end
 
 """
-    _scan_bin_rows(onrow!, path, cols)
+    _scan_bin_rows(onrow!, path, cols; complete=nothing)
 
 Call `onrow!(row)` for each complete row of a binary output file that may
 still be written, and return the number of rows. With `cols === nothing`,
@@ -258,9 +274,17 @@ still be written, and return the number of rows. With `cols === nothing`,
 sorted, unique columns `cols`, and the other values are skipped without
 being stored. A missing or incomplete header gives zero rows, and an
 incomplete last row is ignored. `row` is reused between calls.
+
+With `complete` given (a `Ref{Bool}`, only for `cols === nothing`), it is
+set to `true` if the file ended cleanly: no incomplete last row and, for
+gzip, a finished stream (see `_partial_clean`).
 """
 function _scan_bin_rows(onrow!::F, path::AbstractString,
-    cols::Union{Nothing, Vector{Int}})::Int where {F}
+    cols::Union{Nothing, Vector{Int}};
+    complete::Union{Nothing, Base.RefValue{Bool}}=nothing)::Int where {F}
+    (complete === nothing || cols === nothing) || throw(ArgumentError(
+        "complete is only determined when whole rows are read (cols === nothing)"))
+    complete === nothing || (complete[] = false)
     src = _open_partial(path)
     try
         hdr = Vector{UInt8}(undef, _BIN_HEADER_SIZE)
@@ -273,10 +297,12 @@ function _scan_bin_rows(onrow!::F, path::AbstractString,
             # Whole rows
             rowbytes = Vector{UInt8}(undef, ncols * sizeof(Float64))
             row = reinterpret(Float64, rowbytes)
-            while _read_partial!(src, rowbytes) == length(rowbytes)
+            nlast = 0  # bytes read for the row after the last complete one
+            while (nlast = _read_partial!(src, rowbytes)) == length(rowbytes)
                 onrow!(row)
                 nrows += 1
             end
+            complete === nothing || (complete[] = nlast == 0 && _partial_clean(src))
         else
             # Selected columns: read 8 bytes per wanted value, skip the rest
             row = zeros(Float64, length(cols))
@@ -311,7 +337,7 @@ function _scan_bin_rows(onrow!::F, path::AbstractString,
 end
 
 """
-    _scan_tsv_rows(onrow!, path, delim, cols)
+    _scan_tsv_rows(onrow!, path, delim, cols; complete=nothing)
 
 Call `onrow!(row)` for each complete row of a text output file that may
 still be written, and return the number of rows. Only rows terminated by an
@@ -321,9 +347,14 @@ the row; otherwise it holds the values of the sorted, unique columns `cols`,
 and only those fields are parsed. The file is read in 1 MB chunks, so memory
 use is one row of values, not one row of text. Blank lines and `\\r\\n` line
 endings are accepted. `row` is reused between calls.
+
+With `complete` given (a `Ref{Bool}`), it is set to `true` if the file ended
+cleanly: no unterminated last row and, for gzip, a finished stream (see
+`_partial_clean`).
 """
 function _scan_tsv_rows(onrow!::F, path::AbstractString, delim::Char,
-    cols::Union{Nothing, Vector{Int}})::Int where {F}
+    cols::Union{Nothing, Vector{Int}};
+    complete::Union{Nothing, Base.RefValue{Bool}}=nothing)::Int where {F}
     isascii(delim) && delim != '\n' || throw(ArgumentError(
         "delim must be an ASCII character other than newline, got $(repr(delim))"))
     d = UInt8(delim)
@@ -396,6 +427,8 @@ function _scan_tsv_rows(onrow!::F, path::AbstractString, delim::Char,
             end
             append!(carry, view(chunk, start:n))
         end
+        complete === nothing ||
+            (complete[] = isempty(carry) && col == 0 && _partial_clean(src))
     finally
         _close_partial(src)
     end
@@ -406,14 +439,15 @@ function _scan_tsv_rows(onrow!::F, path::AbstractString, delim::Char,
 end
 
 """
-    _scan_rows(onrow!, path, delim, cols)
+    _scan_rows(onrow!, path, delim, cols; complete=nothing)
 
 Dispatch to `_scan_bin_rows` or `_scan_tsv_rows` by file extension.
 """
 function _scan_rows(onrow!::F, path::AbstractString, delim::Char,
-    cols::Union{Nothing, Vector{Int}})::Int where {F}
-    return _is_binary(path) ? _scan_bin_rows(onrow!, path, cols) :
-        _scan_tsv_rows(onrow!, path, delim, cols)
+    cols::Union{Nothing, Vector{Int}};
+    complete::Union{Nothing, Base.RefValue{Bool}}=nothing)::Int where {F}
+    return _is_binary(path) ? _scan_bin_rows(onrow!, path, cols; complete=complete) :
+        _scan_tsv_rows(onrow!, path, delim, cols; complete=complete)
 end
 
 """

@@ -895,6 +895,110 @@ end
         @test ess(paths, 2) == ess(hcat(V[1:250, 2] .+ 1, V[1:250, 2] .+ 2))
     end
 
+    @testset "Continue an analysis" begin
+        testdir = mktempdir()
+        sim = GRN.simulate(n=200, m=5, u=10, seed=1, effect_sd=0.8, noise_sd=0.25)
+        Y, M = sim.Y, sim.M
+        n, m, u = size(Y, 1), size(Y, 2), size(M, 2)
+        X1 = ones(n, 1)
+
+        # Append to finished files (default gzip text) and recover the effects
+        out = joinpath(testdir, "ss")
+        grn(Y, M, 500:10:1000, outpath=out)
+        grn(out, Y, M, 10:10:500)    # 51 + 50 rows
+        for f in readdir(out)
+            @test preliminary_posterior(joinpath(out, f)).iterations == 101
+        end
+        # GZip.jl (posterior_mean) also reads the appended gzip member
+        Ghat = reshape(posterior_mean(joinpath(out, "G_effects.tsv.gz")), m, m)' # Ghat[j, q]: gene q on gene j
+        @test cor(vec(Ghat), vec(sim.G')) > 0.7
+        # The continued rows alone recover the network as well
+        Gcont = reshape(vec(mean(read_output(joinpath(out, "G_effects.tsv.gz"))[52:101, :], dims=1)), m, m)'
+        @test cor(vec(Gcont), vec(sim.G')) > 0.7
+
+        # Restored spike-and-slab state equals the last row; indicators follow the effects
+        st = GRN._continued_state(out, Y, M, X1, (;))
+        @test st.iteration == 101 && st.complete
+        @test st.format === :tsv && st.compress
+        @test st.data.out.G isa GRN.SpikeSlabState && st.data.out.Q isa GRN.SpikeSlabState
+        @test reduce(vcat, st.data.out.G.effects) == read_output(joinpath(out, "G_effects.tsv.gz"))[end, :]
+        @test st.data.out.Q.pi == read_output(joinpath(out, "Q_pi.tsv.gz"))[end, :]
+        @test all(st.data.out.G.indicator[c] == (st.data.out.G.effects[c] .!= 0) for c in 1:m)
+        @test all(st.data.out.Q.indicator[c] == (st.data.out.Q.effects[c] .!= 0) for c in 1:m)
+
+        # Binary, other priors: exact restore, residuals match the parameters, one header
+        outb = joinpath(testdir, "bin")
+        pr = (Gprior=Laplace(), Qprior=Ridge())
+        grn(Y, M, 10:10:100, outpath=outb, format=:bin, compress=false, priors=pr)
+        st = GRN._continued_state(outb, Y, M, X1, (;))
+        @test st.data.out.G isa GRN.LaplaceState && st.data.out.Q isa GRN.RidgeState
+        @test st.format === :bin && !st.compress && st.complete && st.iteration == 10
+        @test st.data.out.base.residual_variance ==
+              read_binary(joinpath(outb, "base_residual_variance.bin"))[end, :]
+        @test reduce(vcat, st.data.out.G.tau2) == read_binary(joinpath(outb, "G_tau2.bin"))[end, :]
+        @test st.data.out.Q.var == read_binary(joinpath(outb, "Q_variance.bin"))[end, :]
+        G = reduce(hcat, st.data.out.G.effects)          # column c: effects on gene c
+        Q = reduce(hcat, st.data.out.Q.effects)
+        B = reduce(hcat, st.data.out.base.fixedeffects)
+        R = Y .- X1 * B .- (Y .- mean(Y, dims=1)) * G .- (M .- mean(M, dims=1)) * Q
+        @test reduce(hcat, st.data.in.R) ≈ R
+        grn(outb, Y, M, 10:10:100; priors=pr)
+        @test size(read_binary(joinpath(outb, "G_effects.bin"))) == (20, m * m)
+        @test size(read_binary(joinpath(outb, "Q_effects.bin"))) == (20, m * u)
+        @test size(read_binary(joinpath(outb, "G_lambda2.bin"))) == (20, m)
+
+        # Compressed binary and the method without genotypes
+        outn = joinpath(testdir, "nom")
+        grn(Y, 10:10:50, outpath=outn, format=:bin)
+        grn(outn, Y, 5:5:50)
+        @test size(read_binary(joinpath(outn, "G_effects.bin.gz"))) == (15, m * m)
+        @test !isfile(joinpath(outn, "Q_effects.bin.gz"))
+
+        # Data and priors must match the earlier analysis
+        @test_throws ArgumentError grn(out, Y, M, 10:10:20; priors=(Gprior=Ridge(),))
+        @test_throws ArgumentError grn(out, Y, 10:10:20)          # Q_ files, no M
+        @test_throws ArgumentError grn(outn, Y, M, 10:10:20)      # M, no Q_ files
+        @test_throws DimensionMismatch grn(out, Y, M[:, 1:5], 10:10:20)
+        @test_throws ArgumentError grn(joinpath(testdir, "none"), Y, M, 10:10:20)
+        @test preliminary_posterior(joinpath(out, "G_pi.tsv.gz")).iterations == 101
+
+        # Never delete the files being continued
+        @test_throws ArgumentError grn(out, Y, M, 10:10:20; overwrite=true)
+        @test_throws ArgumentError grn(out, Y, M, 10:10:20; outpath=testdir, overwrite=true)
+        @test isdir(out)
+
+        # Interrupted text run: one file ends with a cut row
+        outp = joinpath(testdir, "plain")
+        grn(Y, M, 10:10:100, outpath=outp, compress=false)
+        f = joinpath(outp, "G_effects.tsv")
+        lines = readlines(f)
+        open(f, "w") do io
+            foreach(l -> println(io, l), lines[1:8])
+            print(io, lines[9][1:20])
+        end
+        st = GRN._continued_state(outp, Y, M, X1, (;))
+        @test st.iteration == 8 && !st.complete
+        @test st.data.out.base.residual_variance ==
+              read_output(joinpath(outp, "base_residual_variance.tsv"))[8, :]
+        @test reduce(vcat, st.data.out.G.effects) == read_output(f)[8, :]
+        @test_throws ErrorException grn(outp, Y, M, 10:10:20)
+        grn(outp, Y, M, 10:10:30; outpath=joinpath(testdir, "plain2"))
+        @test size(read_output(joinpath(testdir, "plain2", "G_effects.tsv"))) == (3, m * m)
+        @test size(read_output(joinpath(outp, "G_pi.tsv"))) == (10, m)   # untouched
+
+        # Interrupted gzip run: a stream without its end
+        outz = joinpath(testdir, "cut")
+        cp(out, outz)
+        f = joinpath(outz, "Q_effects.tsv.gz")
+        bytes = read(f)
+        write(f, bytes[1:end-100])
+        st = GRN._continued_state(outz, Y, M, X1, (;))
+        @test !st.complete && st.iteration <= 101
+        @test_throws ErrorException grn(outz, Y, M, 10:10:20)
+        grn(outz, Y, M, 10:10:20; outpath=joinpath(testdir, "cut2"))
+        @test preliminary_posterior(joinpath(testdir, "cut2", "Q_effects.tsv.gz")).iterations == 2
+    end
+
     @testset "Allocations" begin
         # The per-gene Gibbs updates must not allocate
         Random.seed!(4)

@@ -69,6 +69,11 @@ a matrix with genotypes.
  - `Gb`:            An *m* dimensional vector of rates for the prior of lambda2 (Laplace)                                (Float64)
  - `Gcandidates`:   An *m* dimensional vector of vectors with indices of candidate genes                                (Int)
 
+# Continuing an analysis
+ `grn(path, Y, M, chain; ...)`, with the output folder of an earlier analysis
+ as first argument, continues that analysis from its last stored iteration.
+ See the docstring of that method.
+
 # Returns
  - `Nothing`: The relevant output is written to files
 
@@ -85,6 +90,32 @@ function grn(Y::Matrix{Float64},
 
     # Check input
     _checkinput(Y, M, chain, X)
+
+    # Initialize the data bucket with priors inserted
+    data, amounts, ssqs = _setup(Y, M, X, priors)
+
+    # Create folder and IO streams
+    ## This function creates a named collection of IOStreams for later use
+    ofiles = makeout(outpath, _outputs(data, amounts.loci); force=overwrite, compress=compress, format=format)
+
+    # Run the MCMC chain
+    _run_chain!(data, ssqs, amounts, chain, ofiles)
+
+    # Return
+    return nothing
+end
+
+"""
+
+    _setup(Y, M, X, priors)
+
+Print the dimensions, select the priors, create the data bucket, insert the
+priors, and compute the squared sums of the predictors. Shared by new and
+continued analyses. Returns `(data, amounts, ssqs)`.
+
+"""
+function _setup(Y::Matrix{Float64}, M::Matrix{Float64}, X::Matrix{Float64},
+    priors::NamedTuple)::Tuple{NamedTuple, NamedTuple, NamedTuple}
 
     # Get amounts of individuals, genes, marker loci, and fixed effects
     amounts = (individuals=size(Y, 1), genes=size(Y, 2), loci=size(M, 2),
@@ -115,9 +146,19 @@ function grn(Y::Matrix{Float64},
         Y=[dot(y, y) for y in data.in.Y]
     )
 
-    # Create folder and IO streams
-    ## This function creates a named collection of IOStreams for later use
-    ofiles = makeout(outpath, _outputs(data, amounts.loci); force=overwrite, compress=compress, format=format)
+    return data, amounts, ssqs
+end
+
+"""
+
+    _run_chain!(data, ssqs, amounts, chain, ofiles)
+
+Run `last(chain)` Gibbs iterations and write the outputs for the iterations
+in `chain`. The output files are closed afterwards, also on error.
+
+"""
+function _run_chain!(data::NamedTuple, ssqs::NamedTuple, amounts::NamedTuple,
+    chain::AbstractRange{Int}, ofiles::Vector{NamedTuple})::Nothing
 
     try
         # Start analysis
@@ -140,7 +181,6 @@ function grn(Y::Matrix{Float64},
         close_outputs(ofiles)
     end
 
-    # Return
     return nothing
 end
 
@@ -154,6 +194,371 @@ function grn(Y::Matrix{Float64}, chain::AbstractRange{Int};
     format::Symbol=:tsv)
     return grn(Y, zeros(0, 0), chain; X=X, priors=priors, outpath=outpath,
         overwrite=overwrite, compress=compress, format=format)
+end
+
+"""
+
+    grn(path, Y, M, chain; X=ones(size(Y,1), 1), priors=(;), outpath=path, overwrite=false)
+
+Continue an earlier analysis from the results stored in the folder `path`.
+This is the method of `grn` used when the first argument is a folder
+instead of the expression matrix. The sampler state is restored from the last iteration stored in the
+output files, and `last(chain)` further iterations are run. By default the
+new iterations are appended to the existing files, so the files hold one
+long chain that the post-analysis functions read as usual.
+
+The output files hold the sampled parameters, but not the data or the fixed
+prior settings. Give the same `Y`, `M`, `X`, and `priors` as in the original
+call to `grn`, so that the continued chain samples the same model. The prior
+types (`Gprior`, `Qprior`) and the output format and compression are taken
+from the files; a `Gprior` or `Qprior` in `priors` must match them.
+
+# Arguments
+ - `path`:          The folder with the output files of the earlier analysis                                            (String)
+ - `Y`, `M`, `X`:   The data of the earlier analysis (see `grn`)                                                        (Matrix{Float64})
+ - `chain`:         The iterations to write, counted from the restart. For example, `10:10:1000` runs
+                    1000 more iterations and writes every 10th. A burn-in is usually not needed, since the
+                    chain continues from a sample of the earlier run.                                                   (AbstractRange{Int})
+ - `priors`:        The priors of the earlier analysis (see `grn`)                                                      (NamedTuple)
+ - `outpath`:       Where to write the new iterations. With the default (`path`), they are appended to the
+                    existing files. Any other folder gets new files with only the new iterations.                       (String)
+ - `overwrite`:     Denotes whether an existing `outpath` other than `path` should be overwritten                      (Bool)
+
+# Interrupted analyses
+If the earlier analysis was stopped before it finished (e.g. by a time
+limit), the files can end with an incomplete row or an unfinished gzip
+stream, and the files can hold different numbers of iterations, since each
+file is buffered separately. The state is then restored from the last
+iteration that is complete in all files. Appending to such files is not
+possible, so give a new `outpath`.
+
+# Notes
+ - Text output stores values with 10 significant digits, so the restored
+   state is rounded to that precision. Binary output (`format=:bin`) is
+   restored exactly.
+ - The random number generator state is not stored. The continued chain is
+   a valid continuation of the Markov chain, but not the same draws as one
+   uninterrupted run.
+ - Restoring reads every output file once (twice for files with more
+   iterations than the others after an interruption).
+
+# Returns
+ - `Nothing`: The relevant output is written to files
+
+# Example
+```julia
+grn(Y, M, 10000:50:100000; outpath="grn_example")
+grn("grn_example", Y, M, 50:50:50000)    # 1000 more stored iterations
+```
+
+"""
+function grn(path::AbstractString, Y::Matrix{Float64},
+    M::Matrix{Float64}=zeros(0, 0),
+    chain::AbstractRange{Int}=10:10:100;
+    X::Matrix{Float64}=ones(size(Y, 1), 1),
+    priors::NamedTuple=(;),
+    outpath::AbstractString=path,
+    overwrite::Bool=false)
+
+    # Check input
+    isdir(path) || throw(ArgumentError("No output directory at $path"))
+    _checkinput(Y, M, chain, X)
+    append = ispath(outpath) && samefile(outpath, path)
+    overwrite && _inside(path, outpath) && throw(ArgumentError(
+        "overwrite=true would delete the output files in $path that are being continued"))
+
+    # Restore the state of the last stored iteration
+    st = _continued_state(path, Y, M, X, priors)
+
+    # Appending needs files that were closed properly
+    if append && !st.complete
+        error("The output files in $path were not closed properly (the analysis was " *
+              "probably interrupted), so new iterations cannot be appended to them. " *
+              "Give a new folder with `outpath` to continue from iteration $(st.iteration).")
+    end
+
+    # Open the output files and run the chain
+    ofiles = makeout(outpath, _outputs(st.data, st.amounts.loci); force=overwrite,
+        compress=st.compress, format=st.format, append=append)
+    _run_chain!(st.data, st.ssqs, st.amounts, chain, ofiles)
+
+    return nothing
+end
+
+# Convenience method for analyses without genotypes
+function grn(path::AbstractString, Y::Matrix{Float64}, chain::AbstractRange{Int};
+    X::Matrix{Float64}=ones(size(Y, 1), 1),
+    priors::NamedTuple=(;),
+    outpath::AbstractString=path,
+    overwrite::Bool=false)
+    return grn(path, Y, zeros(0, 0), chain; X=X, priors=priors,
+        outpath=outpath, overwrite=overwrite)
+end
+
+"""
+
+    _inside(inner, outer)
+
+Return `true` if the existing path `inner` is `outer` or lies inside it.
+
+"""
+function _inside(inner::AbstractString, outer::AbstractString)::Bool
+    ispath(outer) || return false
+    p = realpath(inner)
+    while true
+        samefile(p, outer) && return true
+        parent = dirname(p)
+        parent == p && return false
+        p = parent
+    end
+end
+
+"""
+
+    _continued_state(path, Y, M, X, priors)
+
+Set up the data bucket as `grn` does, then restore the sampled parameters
+from the last iteration stored in all output files in `path`, rebuild the
+state that is not written to file (`_restore!`), and recompute the
+residuals. Returns a NamedTuple with `data`, `amounts`, `ssqs`, the
+`format` and `compress` of the files, the restored `iteration` (row number
+in the files), and `complete` (all files ended cleanly with the same number
+of iterations).
+
+"""
+function _continued_state(path::AbstractString, Y::Matrix{Float64},
+    M::Matrix{Float64}, X::Matrix{Float64}, priors::NamedTuple)::NamedTuple
+
+    # Format and compression of the earlier analysis
+    ext = _output_extension(path)
+    format = startswith(ext, ".bin") ? :bin : :tsv
+    compress = endswith(ext, ".gz")
+
+    # Prior types of the earlier analysis
+    priors = _continued_priors(path, ext, priors)
+
+    # Set up the data bucket exactly as grn does
+    data, amounts, ssqs = _setup(Y, M, X, priors)
+    outputs = _outputs(data, amounts.loci)
+    _check_output_files(path, ext, keys(outputs))
+
+    # Restore the sampled parameters and the state derived from them
+    iteration, complete = _restore_outputs!(outputs, path, ext)
+    _restore!(data.out.G)
+    amounts.loci > 0 && _restore!(data.out.Q)
+    _residuals!(data, Y, amounts.loci)
+    println("Continuing from stored iteration $iteration in $path")
+
+    return (data=data, amounts=amounts, ssqs=ssqs, format=format,
+        compress=compress, iteration=iteration, complete=complete)
+end
+
+"""
+
+    _output_extension(path)
+
+Return the file extension (`.tsv.gz`, `.tsv`, `.bin.gz`, or `.bin`) of the
+output files in `path`, from the `base_residual_variance` file that every
+analysis writes.
+
+"""
+function _output_extension(path::AbstractString)::String
+    found = [e for e in (".tsv.gz", ".tsv", ".bin.gz", ".bin")
+             if isfile(joinpath(path, "base_residual_variance$e"))]
+    isempty(found) && throw(ArgumentError(
+        "No GRN output files in $path (no base_residual_variance file)"))
+    length(found) == 1 || throw(ArgumentError(
+        "Output files in several formats in $path: $(join(found, ", "))"))
+    return found[1]
+end
+
+"""
+
+    _continued_priors(path, ext, priors)
+
+Add the prior selectors of the earlier analysis in `path` to `priors`, or
+check that the selectors given in `priors` are of the same type.
+
+"""
+function _continued_priors(path::AbstractString, ext::AbstractString,
+    priors::NamedTuple)::NamedTuple
+    for (g, key) in ((:G, :Gprior), (:Q, :Qprior))
+        T = _detect_prior(path, g, ext)
+        T === nothing && continue
+        if haskey(priors, key)
+            priors[key] isa T || throw(ArgumentError(
+                "$key is $(typeof(priors[key])), but the analysis in $path used $T"))
+        else
+            priors = merge(priors, NamedTuple{(key,)}((T(),)))
+        end
+    end
+    return priors
+end
+
+"""
+
+    _check_output_files(path, ext, names)
+
+Check that `path` holds exactly the output files `names` (with extension
+`ext`) among its `base_`, `G_`, and `Q_` files, so the data and priors match
+the earlier analysis.
+
+"""
+function _check_output_files(path::AbstractString, ext::AbstractString, names)::Nothing
+    expected = ["$k$ext" for k in names]
+    for f in expected
+        isfile(joinpath(path, f)) || throw(ArgumentError(
+            "Missing output file $f in $path. Y, M, X, and priors must match the analysis being continued"))
+    end
+    extra = [f for f in readdir(path) if endswith(f, ext) && !(f in expected) &&
+             any(p -> startswith(f, p), ("base_", "G_", "Q_"))]
+    isempty(extra) || throw(ArgumentError(
+        "Output files $(join(extra, ", ")) in $path are not written by an analysis with the " *
+        "given data and priors (e.g. Q_ files need the genotypes M)"))
+    return nothing
+end
+
+"""
+
+    _restore_outputs!(outputs, path, ext)
+
+Overwrite each output object in `outputs` with the last iteration that is
+stored in all output files in `path`. Files are read in parallel, and files
+holding more iterations are read again up to that iteration. Returns the
+iteration (row number) and whether all files ended cleanly with the same
+number of iterations.
+
+"""
+function _restore_outputs!(outputs::NamedTuple, path::AbstractString,
+    ext::AbstractString)::Tuple{Int, Bool}
+    names = collect(keys(outputs))
+    files = [joinpath(path, "$k$ext") for k in names]
+    nrows = zeros(Int, length(names))
+    clean = [Ref(false) for _ in names]
+
+    try
+        # Last row of every file
+        @threads for j in eachindex(names)
+            nrows[j] = _read_row!(outputs[names[j]], files[j], 0; complete=clean[j])
+        end
+        minimum(nrows) > 0 || error("No iteration is stored in all output files in $path")
+
+        # Files that are ahead of the others are read up to iteration n
+        n = minimum(nrows)
+        @threads for j in findall(>(n), nrows)
+            _read_row!(outputs[names[j]], files[j], n)
+        end
+    catch e
+        _rethrow_task_error(e)
+    end
+
+    n = minimum(nrows)
+    return n, all(r -> r[], clean) && all(==(n), nrows)
+end
+
+"""
+
+    _rethrow_task_error(e)
+
+Rethrow the original exception from inside a `@threads` loop, which arrives
+wrapped in a `TaskFailedException` or `CompositeException`.
+
+"""
+function _rethrow_task_error(e)
+    while true
+        if e isa CompositeException && !isempty(e.exceptions)
+            e = first(e.exceptions)
+        elseif e isa TaskFailedException
+            e = e.task.exception
+        else
+            throw(e)
+        end
+    end
+end
+
+"""
+
+    _read_row!(dest, file, target; complete=nothing)
+
+Copy row `target` of an output file (the last complete row for
+`target == 0`) into the output object `dest`, and return the number of
+complete rows in the file. The file is streamed, so memory use is one row.
+
+"""
+function _read_row!(dest::AbstractVector, file::AbstractString, target::Int;
+    complete::Union{Nothing, Base.RefValue{Bool}}=nothing)::Int
+    ncols = _ncols(dest)
+    i = Ref(0)
+    return _scan_rows(file, '\t', nothing; complete=complete) do row
+        length(row) == ncols || throw(DimensionMismatch(
+            "$file has $(length(row)) values per iteration, but $ncols are expected " *
+            "for the given data and priors"))
+        i[] += 1
+        (target == 0 || i[] == target) && _copyrow!(dest, row)
+        return nothing
+    end
+end
+
+"""
+
+    _copyrow!(dest, row)
+
+Copy a flat row of values into an output object: a vector, or a vector of
+vectors filled in order (the layout `write_output` uses).
+
+"""
+function _copyrow!(dest::Vector{Float64}, row::AbstractVector{Float64})::Nothing
+    copyto!(dest, row)
+    return nothing
+end
+
+function _copyrow!(dest::Vector{Vector{Float64}}, row::AbstractVector{Float64})::Nothing
+    o = 0
+    for v in dest
+        copyto!(v, 1, row, o + 1, length(v))
+        o += length(v)
+    end
+    return nothing
+end
+
+"""
+
+    _residuals!(d, Y, loci)
+
+Recompute the residual of every gene from the data and the current
+parameters: `y - X * beta - Yc * G - Mc * Q`, with `Yc` and `Mc` the
+centered predictors used by the sampler. Run in parallel over genes; each
+task writes only the residuals of its own genes.
+
+"""
+function _residuals!(d::NamedTuple, Y::Matrix{Float64}, loci::Int)::Nothing
+    chunks = d.tmpshared.split_chunks
+    @threads for s in eachindex(chunks)
+        for c in chunks[s]
+            r = d.in.R[c]
+            r .= view(Y, :, c)
+            _subtract_effects!(r, d.out.base.fixedeffects[c], d.in.X)
+            _subtract_effects!(r, d.out.G.effects[c], d.in.Y)
+            loci > 0 && _subtract_effects!(r, d.out.Q.effects[c], d.in.M)
+        end
+    end
+    return nothing
+end
+
+"""
+
+    _subtract_effects!(r, w, X)
+
+Subtract `X[q] * w[q]` from `r` for every non-zero effect `w[q]`.
+
+"""
+function _subtract_effects!(r::Vector{Float64}, w::Vector{Float64},
+    X::Vector{Vector{Float64}})::Nothing
+    @inbounds for q in eachindex(w)
+        wq = w[q]
+        wq != 0.0 && (r .-= wq .* X[q])
+    end
+    return nothing
 end
 
 """

@@ -6,7 +6,7 @@ const _BIN_VERSION = UInt32(1)
 const _BIN_HEADER_SIZE = 16  # magic(4) + version(4) + ncols(8)
 
 """
-    makeout(p, outputs; force=false, compress=true, format=:tsv)
+    makeout(p, outputs; force=false, compress=true, format=:tsv, append=false)
 
 Create an output folder and open one output file per entry in
 `outputs`, a NamedTuple that maps a file name to the object that will be
@@ -16,10 +16,15 @@ object, the IO stream, a persistent IOBuffer, and the format.
 # Arguments
  - `p`:        Output directory path
  - `outputs`:  NamedTuple mapping file names to output objects
- - `force`:    Overwrite existing directory
+ - `force`:    Overwrite existing directory (ignored with `append=true`)
  - `compress`: Gzip-compress the output (level 1, fast)
  - `format`:   `:tsv` for tab-separated text (default) or `:bin` for
                raw binary Float64 with a 16-byte header
+ - `append`:   Open the existing files in `p` and append rows to them
+               instead of creating new files. Every file must exist. No
+               binary header is written, and gzip output is added as a new
+               gzip member, which gzip readers decompress as one stream.
+               Used when `grn` continues an analysis.
 
 # File extensions
  - `format=:tsv, compress=true`  → `.tsv.gz`
@@ -28,20 +33,25 @@ object, the IO stream, a persistent IOBuffer, and the format.
  - `format=:bin, compress=false` → `.bin`
 """
 function makeout(p::AbstractString, outputs::NamedTuple; force::Bool=false,
-    compress::Bool=true, format::Symbol=:tsv)::Vector{NamedTuple}
+    compress::Bool=true, format::Symbol=:tsv, append::Bool=false)::Vector{NamedTuple}
 
     format in (:tsv, :bin) || throw(ArgumentError(
         "format must be :tsv or :bin, got :$format"))
 
-    # Handle existing directory
-    if isdir(p)
-        force || error("The output directory $p already exists")
-        rm(p, force=true, recursive=true)
-        sleep(1) # Wait for the removal to be picked up by the file system
-    end
+    if append
+        # Append to the files of an existing directory
+        isdir(p) || error("The output directory $p does not exist")
+    else
+        # Handle existing directory
+        if isdir(p)
+            force || error("The output directory $p already exists")
+            rm(p, force=true, recursive=true)
+            sleep(1) # Wait for the removal to be picked up by the file system
+        end
 
-    # Make new directory
-    mkpath(p)
+        # Make new directory
+        mkpath(p)
+    end
 
     # Determine file extension
     ext = if format === :bin
@@ -50,14 +60,24 @@ function makeout(p::AbstractString, outputs::NamedTuple; force::Bool=false,
         compress ? ".tsv.gz" : ".tsv"
     end
 
+    # Check that all files exist before any of them is opened for appending
+    if append
+        for k in keys(outputs)
+            f = joinpath(abspath(p), "$k$ext")
+            isfile(f) || error("Cannot append: the output file $f does not exist")
+        end
+    end
+
     # Create one IO stream and one persistent buffer per output object
+    mode = append ? "a" : "w"
     files = NamedTuple[]
     for k in keys(outputs)
-        io = compress ? GZip.open(joinpath(abspath(p), "$k$ext"), "w", 1) : open(joinpath(abspath(p), "$k$ext"), "w")
+        f = joinpath(abspath(p), "$k$ext")
+        io = compress ? GZip.open(f, mode, 1) : open(f, mode)
         buf = IOBuffer(sizehint=_BUFSIZE)
 
-        # Write binary header (magic + version + ncols)
-        if format === :bin
+        # Write binary header (magic + version + ncols) to new files only
+        if format === :bin && !append
             ncols = _ncols(outputs[k])
             write(buf, _BIN_MAGIC)
             write(buf, _BIN_VERSION)

@@ -6,9 +6,11 @@
 #  2. A state type holding the per-gene Gibbs state, created with `_initstate`
 #  3. Methods for `_sample_effects_gene!`, `_sample_hyperparameters!`,
 #     `_outputs`, and `_varscale!`
+#  4. For continuing an analysis (`grn(path, ...)`): a `_restore!` method if part of the sampled state
+#     is not written to file, and a case in `_detect_prior`
 #
 # Adding a new prior: define a selector and a state subtype of
-# `AbstractEffectPriorState`, plus the four methods above.
+# `AbstractEffectPriorState`, plus the methods above.
 
 abstract type AbstractEffectPrior end
 abstract type AbstractEffectPriorState end
@@ -161,3 +163,45 @@ _outputs(st::LaplaceState) = (
 _varscale!(st::SpikeSlabState) = st.varscale .= st.var .* (st.vardf .- 2.0)
 _varscale!(st::RidgeState) = st.varscale .= st.var .* (st.vardf .- 2.0)
 _varscale!(st::LaplaceState) = nothing
+
+# ---------------------------------------------------------------- Continuation
+
+"""
+
+    _restore!(st)
+
+Rebuild the parts of a prior state that are sampled but not written to the
+output files, after the outputs (`_outputs(st)`) have been read back from
+the last stored iteration. Used when `grn` continues an analysis. For spike-and-slab, the
+indicators are recovered from the effects (an included effect is non-zero
+with probability one). Priors whose state is fully written need no method.
+
+"""
+_restore!(::AbstractEffectPriorState)::Nothing = nothing
+function _restore!(st::SpikeSlabState)::Nothing
+    for c in eachindex(st.effects)
+        st.indicator[c] .= st.effects[c] .!= 0.0
+    end
+    return nothing
+end
+
+"""
+
+    _detect_prior(path, group, ext)
+
+Return the type of the prior selector used for `group` (`:G` or `:Q`) in an
+earlier analysis, from the output files in `path` with extension `ext`:
+`<group>_pi` exists for `SpikeSlab`, `<group>_tau2` for `Laplace`, and
+`<group>_variance` alone for `Ridge`. Returns `nothing` when the group has
+no output files.
+
+"""
+function _detect_prior(path::AbstractString, group::Symbol,
+    ext::AbstractString)::Union{Nothing, Type{<:AbstractEffectPrior}}
+    has(name) = isfile(joinpath(path, "$(group)_$name$ext"))
+    has("effects") || return nothing
+    has("pi") && return SpikeSlab
+    has("tau2") && return Laplace
+    has("variance") && return Ridge
+    return nothing
+end

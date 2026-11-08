@@ -15,6 +15,16 @@ The prior for each effect group is selectable per relation type:
 - `Ridge(; var, vardf)` — Gaussian prior with sampled per-gene variance
 - `Laplace(; lambda2, a, b)` — Bayesian lasso prior
 
+## Continuing an analysis
+
+`grn(path, Y, M, chain)` continues an analysis from the last
+iteration stored in the output folder `path`, and appends the new iterations
+to the existing files. Give the same `Y`, `M`, `X`, and `priors` as in the
+call to `grn`; the prior types, format, and compression are read from the
+files. An analysis that was interrupted (unfinished files) is continued from
+the last iteration complete in all files, into a new folder given with
+`outpath`.
+
 ## Post-analysis
 
 Use the functions in `GRN.postanalysis` (`accuracy`, `posterior_mean`,

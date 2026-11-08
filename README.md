@@ -60,6 +60,37 @@ grn(Y, M, 10000:50:100000, outpath = "grn_example3", priors = (Gprior = Laplace(
 
 A complete list of prior keys is in the docstring of `grn`.
 
+### Continuing an analysis
+
+`grn(path, Y, M, chain)` continues an analysis from the last iteration stored in its
+output folder, for example to collect more samples or to resume a run that
+was stopped. The output files hold the sampled parameters but not the input
+data or the fixed prior settings, so give the same `Y`, `M`, `X`, and
+`priors` as in the call to `grn`. The prior types, output format, and
+compression are read from the files.
+
+```julia
+grn(Y, M, 10000:50:100000, outpath = "grn_example")
+
+# 50000 more iterations, every 50th appended to the files in grn_example
+grn("grn_example", Y, M, 50:50:50000)
+```
+
+The `chain` is counted from the restart, and no burn-in is needed, since the
+chain continues from a sample of the earlier run. If the earlier run was
+interrupted (for example by a time limit), its files can end with a partial
+row or an unfinished gzip stream. The run is then continued from the last
+iteration that is complete in all files, and the new iterations must go to a
+new folder:
+
+```julia
+grn("grn_example", Y, M, 50:50:50000; outpath = "grn_example_part2")
+```
+
+Text output stores 10 significant digits, so a run continued from `.tsv`
+files starts from a rounded state; binary output (`format = :bin`) is
+restored exactly.
+
 ### Output
 
 The analysis writes one tab-separated file (`.tsv`) per output parameter to the

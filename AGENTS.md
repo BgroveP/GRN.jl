@@ -41,7 +41,7 @@ julia --project=docs docs/make.jl                          # build docs
 | `src/priors.jl` | Prior selectors (`SpikeSlab`, `Ridge`, `Laplace`), state types, `_initstate`, `_outputs`, `_varscale!` |
 | `src/initialize.jl` | `create_databucket`, `insert_priors!` |
 | `src/sample.jl` | Gibbs samplers and internal scalar random draws (allocation-free hot path) |
-| `src/estimate.jl` | `grn()` entry point, `_outputs()` collector |
+| `src/estimate.jl` | `grn()` entry point (new analysis, or `grn(path, ...)` to continue from stored output), `_outputs()` collector |
 | `src/io.jl` | Output files: `makeout`, `write_output`, `flush_outputs`, `close_outputs`; TSV and binary writers |
 | `src/postanalysis.jl` | `accuracy`, `posterior_mean`, `posterior_inclusion_probability`, `derive_indicator`, `read_binary`, `read_output`, `preliminary_posterior` and `preliminary_column` (files still being written, built on `_scan_tsv_rows` / `_scan_bin_rows`) |
 | `src/diagnostics.jl` | MCMC convergence diagnostics: `ess` (Vehtari et al. 2021; adapted from R `posterior`, BSD-3), internal `_qnorm`; validated against MCMCDiagnosticTools |
@@ -88,6 +88,9 @@ julia --project=docs docs/make.jl                          # build docs
    keyword constructor and docstring) and a state `<: AbstractEffectPriorState`.
 2. Add methods for `_initstate`, `_outputs`, and `_varscale!` (`src/priors.jl`)
    and `_sample_effects_gene!`, `_sample_hyperparameters_gene!` (`src/sample.jl`).
+   For continuing an analysis (`grn(path, ...)`): add a case to `_detect_prior` (identify the prior from
+   its output file names) and a `_restore!` method if part of the sampled
+   state is not written to file (`src/priors.jl`).
 3. Export the selector in `src/GRN.jl`, list it in the `grn` docstring, README,
    and `docs/src/index.md`.
 4. Add tests: output files written, allocation-free updates, effect recovery
@@ -112,7 +115,7 @@ julia --project=docs docs/make.jl                          # build docs
   fixed effects, prior insertion, analysis and output, compressed output,
   plain output, PIP and `derive_indicator`, binary output, preliminary
   results, preliminary columns, read output into a matrix, effective
-  sample size, allocations.
+  sample size, continue an analysis, allocations.
 - Every new output file, output format, or post-analysis function needs a
   test.
 - Changes to the samplers must keep the effect-recovery tests (correlation

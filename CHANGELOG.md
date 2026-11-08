@@ -4,6 +4,29 @@
 
 ### Added
 
+- `grn(path, Y, M, chain; X, priors, outpath=path, overwrite=false)`, a
+  method of `grn` with the output folder as first argument, continues an
+  analysis from the last iteration stored in that folder.
+  The sampled parameters are read back from the output files (streamed, one
+  row in memory per file), the spike-and-slab indicators are recovered from
+  the effects, and the residuals are recomputed from the data. The prior
+  types (from the file names) and the output format and compression (from
+  the extension) are detected; `Y`, `M`, `X`, and `priors` must be given as
+  in the original `grn` call, since the fixed prior settings are not
+  stored. New iterations are appended to the existing files by default
+  (gzip output as a new gzip member, binary output without a second header).
+  A run that was interrupted is continued from the last iteration complete
+  in all files, into a new folder given with `outpath`; appending to such
+  files raises an error (`src/estimate.jl`)
+- `grn_example8` in `examples/examples.jl`: continues `grn_example1` into a
+  new folder, with its accuracy in the report
+- `_restore!` and `_detect_prior` per-prior hooks for continuation
+  (`src/priors.jl`)
+- `makeout(...; append=true)` opens existing output files for appending
+  (`src/io.jl`)
+- `_scan_tsv_rows` / `_scan_bin_rows` take a `complete` keyword that reports
+  whether a file ended cleanly (no partial row, finished gzip stream, using
+  zlib's `gzerror`) (`src/postanalysis.jl`)
 - `preliminary_posterior(path; delim='\t')` — posterior mean, PIP, and the
   number of complete iterations from an output file of a run that is still
   going or was stopped. Returns `(mean, pip, iterations)` in one pass. Rows
@@ -89,6 +112,8 @@
 
 ### Changed
 
+- `grn()` setup and sampling loop moved into `_setup` and `_run_chain!`,
+  shared by new and continued analyses; behavior unchanged (`src/estimate.jl`)
 - **Breaking:** `X` can no longer be `nothing` in `grn()` and
   `create_databucket()`. The default is now `ones(n, 1)` (intercept only)
   directly in the type signature (`X::Matrix{Float64}=ones(n, 1)`), removing
